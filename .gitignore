@@ -1,0 +1,8 @@
+/target
+/workspace
+*.o
+*.a
+*.so
+*.dylib
+.venv/
+__pycache__/

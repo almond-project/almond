@@ -1,0 +1,12 @@
+[package]
+name = "almond-cc"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+cc = { workspace = true, features = ["parallel"] }
+which = "8.0.0"
+glob = "0.3"
+
+[dependencies]
+libafl_cc = "0.15.4"

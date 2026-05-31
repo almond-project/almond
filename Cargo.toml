@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/almond",
+    "crates/almond-cc",
+]
+resolver = "3"
+
+[workspace.dependencies]
+serde = { version = "1.0.228", default-features = false }
+log = "0.4.28"
+cc = "1.1.21"
+
+[profile.dev]
+debug-assertions = true
+opt-level = 3
+
+[profile.release]
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = 'unwind'
+codegen-units = 1
+opt-level = 3
+
+[profile.test]
+opt-level = 3
