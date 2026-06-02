@@ -3,11 +3,12 @@
 // Copyright (c) 2025 Almond Contributors.
 
 use core::str;
-use std::path::PathBuf;
 use std::{env, fs::File, io::Write, path::Path, process::Command};
 
 #[cfg(target_vendor = "apple")]
 use glob::glob;
+#[cfg(target_vendor = "apple")]
+use std::path::PathBuf;
 use which::which;
 
 /// The max version of `LLVM` we're looking for
@@ -17,20 +18,6 @@ const LLVM_VERSION_MAX: u32 = 21;
 /// The min version of `LLVM` we're looking for
 #[cfg(not(target_vendor = "apple"))]
 const LLVM_VERSION_MIN: u32 = 15;
-
-fn dll_extension<'a>() -> &'a str {
-    if let Ok(vendor) = env::var("CARGO_CFG_TARGET_VENDOR")
-        && vendor == "apple"
-    {
-        return "dylib";
-    }
-    let family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_else(|_| "unknown".into());
-    match family.as_str() {
-        "windows" => "dll",
-        "unix" => "so",
-        _ => panic!("Unsupported target family: {family}"),
-    }
-}
 
 /// Github Actions for `MacOS` seems to have troubles finding `llvm-config`.
 /// Hence, we go look for it ourselves.
@@ -114,18 +101,6 @@ fn exec_llvm_config(args: &[&str]) -> String {
     }
 }
 
-/// Use `xcrun` to get the path to the Xcode SDK tools library path, for linking
-fn find_macos_sdk_libs() -> String {
-    let sdk_path_out = Command::new("xcrun")
-        .arg("--show-sdk-path")
-        .output()
-        .expect("Failed to execute xcrun. Make sure you have Xcode installed and executed `sudo xcode-select --install`");
-    format!(
-        "-L{}/usr/lib",
-        String::from_utf8(sdk_path_out.stdout).unwrap().trim()
-    )
-}
-
 fn find_llvm_version() -> Option<i32> {
     let llvm_env_version = env::var("LLVM_VERSION");
     let output = if let Ok(version) = llvm_env_version {
@@ -141,129 +116,25 @@ fn find_llvm_version() -> Option<i32> {
     None
 }
 
-#[expect(clippy::too_many_arguments)]
-fn build_pass(
-    bindir_path: &Path,
-    out_dir: &Path,
-    cxxflags: &Vec<String>,
-    ldflags: &Vec<&str>,
-    src_dir: &Path,
-    src_file: &str,
-    additional_srcfiles: Option<&Vec<&str>>,
-    required: bool,
-) {
-    let target_dir = out_dir.ancestors().nth(3).unwrap();
-    let dot_offset = src_file.rfind('.').unwrap();
-    let src_stub = &src_file[..dot_offset];
-
-    let additionals = if let Some(x) = additional_srcfiles {
-        x.iter().map(|f| src_dir.join(f)).collect::<Vec<PathBuf>>()
-    } else {
-        Vec::new()
-    };
-
-    println!("cargo:rerun-if-changed=src/{src_file}");
-    let command_result = if cfg!(unix) {
-        let r = Command::new(bindir_path.join("clang++"))
-            .arg("-v")
-            .arg(format!("--target={}", env::var("HOST").unwrap()))
-            .args(cxxflags)
-            .arg(src_dir.join(src_file))
-            .args(additionals)
-            .args(ldflags)
-            .arg("-o")
-            .arg(target_dir.join(format!("{src_stub}.{}", dll_extension())))
-            .status();
-
-        Some(r)
-    } else if cfg!(windows) {
-        let r = Command::new(bindir_path.join("clang-cl.exe"))
-            .arg("-v")
-            .arg(format!("--target={}", env::var("HOST").unwrap()))
-            .args(cxxflags)
-            .arg(src_dir.join(src_file))
-            .args(additionals)
-            .arg("/link")
-            .args(ldflags)
-            .arg(format!(
-                "/OUT:{}",
-                target_dir
-                    .join(format!("{src_stub}.{}", dll_extension()))
-                    .display()
-            ))
-            .status();
-        Some(r)
-    } else {
-        None
-    };
-
-    match command_result {
-        Some(res) => match res {
-            Ok(s) => {
-                if !s.success() {
-                    if required {
-                        panic!(
-                            "Failed to compile required compiler pass src/{src_file} - Exit status: {s}"
-                        );
-                    } else {
-                        println!(
-                            "cargo:warning=Skipping non-required compiler pass src/{src_file} - Reason: Exit status {s}. You can ignore this error unless you want this compiler pass."
-                        );
-                    }
-                }
-            }
-            Err(err) => {
-                if required {
-                    panic!(
-                        "Failed to compile required compiler pass src/{src_file} - Exit status: {err}"
-                    );
-                } else {
-                    println!(
-                        "cargo:warning=Skipping non-required compiler pass src/{src_file} - Reason: Exit status {err}. You can ignore this error unless you want this compiler pass."
-                    );
-                }
-            }
-        },
-        None => {
-            println!(
-                "cargo:warning=Skipping compiler pass src/{src_file} - Only supported on Windows or *nix."
-            );
-        }
-    }
-}
-
-#[expect(clippy::too_many_lines)]
 fn main() {
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let out_dir = Path::new(&out_dir);
-    let src_dir = Path::new("src");
 
     let dest_path = Path::new(&out_dir).join("clang_constants.rs");
     let mut clang_constants_file = File::create(dest_path).expect("Could not create file");
 
     println!("cargo:rerun-if-env-changed=LLVM_CONFIG");
     println!("cargo:rerun-if-env-changed=LLVM_BINDIR");
-    println!("cargo:rerun-if-env-changed=LLVM_AR_PATH");
-    println!("cargo:rerun-if-env-changed=LLVM_CXXFLAGS");
-    println!("cargo:rerun-if-env-changed=LLVM_LDFLAGS");
     println!("cargo:rerun-if-env-changed=LLVM_VERSION");
     println!("cargo:rerun-if-changed=build.rs");
 
     let llvm_bindir = env::var("LLVM_BINDIR");
-    let llvm_ar_path = env::var("LLVM_AR_PATH");
-    let llvm_cxxflags = env::var("LLVM_CXXFLAGS");
-    let llvm_ldflags = env::var("LLVM_LDFLAGS");
     let llvm_version = env::var("LLVM_VERSION");
 
-    // test if llvm-config is available and we can compile the passes
-    if find_llvm_config().is_err()
-        && !(llvm_bindir.is_ok()
-            && llvm_cxxflags.is_ok()
-            && llvm_ldflags.is_ok()
-            && llvm_version.is_ok())
-    {
+    // test if llvm-config is available so we can locate clang
+    if find_llvm_config().is_err() && !(llvm_bindir.is_ok() && llvm_version.is_ok()) {
         println!(
-            "cargo:warning=Failed to find llvm-config, we will not build LLVM passes. If you need them, set the LLVM_CONFIG environment variable to a recent llvm-config, else just ignore this message."
+            "cargo:warning=Failed to find llvm-config, falling back to `clang`/`clang++` on PATH. If you need a specific toolchain, set the LLVM_CONFIG environment variable to a recent llvm-config, else just ignore this message."
         );
 
         write!(
@@ -274,7 +145,7 @@ pub const CLANG_PATH: &str = \"clang\";
 /// The path to the `clang++` executable
 pub const CLANGXX_PATH: &str = \"clang++\";
 
-/// The llvm version used to build llvm passes
+/// The llvm version of the located toolchain
 pub const LIBAFL_CC_LLVM_VERSION: Option<usize> = None;
     "
         )
@@ -289,24 +160,16 @@ pub const LIBAFL_CC_LLVM_VERSION: Option<usize> = None;
         exec_llvm_config(&["--bindir"])
     };
     let bindir_path = Path::new(&llvm_bindir);
-    let llvm_ar_path = if let Ok(ar_path) = llvm_ar_path {
-        ar_path
-    } else {
-        exec_llvm_config(&["--bindir"])
-    };
 
     let clang;
     let clangcpp;
-    let llvm_ar;
 
     if cfg!(windows) {
         clang = bindir_path.join("clang.exe");
         clangcpp = bindir_path.join("clang++.exe");
-        llvm_ar = Path::new(&llvm_ar_path).join("llvm-ar.exe");
     } else {
         clang = bindir_path.join("clang");
         clangcpp = bindir_path.join("clang++");
-        llvm_ar = Path::new(&llvm_ar_path).join("llvm-ar");
     }
 
     let mut found = true;
@@ -321,23 +184,11 @@ pub const LIBAFL_CC_LLVM_VERSION: Option<usize> = None;
         found = false;
     }
 
-    if !llvm_ar.exists() {
-        println!("cargo:warning=Failed to find binary: llvm-ar.");
-        found = false;
-    }
-
     assert!(
         found,
         "\n\tAt least one of the LLVM dependencies could not be found.\n\tThe following search directory was considered: {}\n",
         bindir_path.display()
     );
-
-    let cxxflags = if let Ok(flags) = llvm_cxxflags {
-        flags
-    } else {
-        exec_llvm_config(&["--cxxflags"])
-    };
-    let mut cxxflags: Vec<String> = cxxflags.split_whitespace().map(String::from).collect();
 
     let llvm_version = find_llvm_version();
 
@@ -353,85 +204,9 @@ pub const CLANG_PATH: &str = {clang:?};
 /// The path to the `clang++` executable
 pub const CLANGXX_PATH: &str = {clangcpp:?};
 
-/// The llvm version used to build llvm passes
+/// The llvm version of the located toolchain
 pub const LIBAFL_CC_LLVM_VERSION: Option<usize> = {llvm_version:?};
         ",
     )
     .expect("Could not write file");
-
-    let mut llvm_config_ld = vec![];
-    if cfg!(target_vendor = "apple") {
-        llvm_config_ld.push("--libs");
-    }
-    if cfg!(windows) {
-        llvm_config_ld.push("--libs");
-        llvm_config_ld.push("--system-libs");
-    }
-    llvm_config_ld.push("--ldflags");
-
-    let ldflags = if let Ok(flags) = llvm_ldflags {
-        flags
-    } else {
-        exec_llvm_config(&llvm_config_ld)
-    };
-    let mut ldflags: Vec<&str> = ldflags.split_whitespace().collect();
-
-    if cfg!(unix) {
-        cxxflags.push(String::from("-shared"));
-        cxxflags.push(String::from("-fPIC"));
-        cxxflags.push(String::from("-std=c++17")); // std::nullopt_t requires this
-    }
-    if cfg!(windows) {
-        cxxflags.push(String::from("-fuse-ld=lld"));
-        cxxflags.push(String::from("/LD"));
-        /* clang on Windows links against the libcmt.lib runtime
-         * however, the distributed binaries are compiled against msvcrt.lib
-         * we need to also use msvcrt.lib instead of libcmt.lib when building the optimization passes
-         * first, we tell clang-cl (and indirectly link) to ignore libcmt.lib via -nodefaultlib:libcmt
-         * second, we pass the /MD flag to clang-cl to use the msvcrt.lib runtime instead when generating the object file
-         */
-        ldflags.push("-nodefaultlib:libcmt");
-        cxxflags.push(String::from("/MD"));
-        /* the include directories are not always added correctly when running --cxxflags or --includedir on windows
-         * this is somehow related to where/how llvm was compiled (vm, docker container, host)
-         * add the option of setting additional flags via the LLVM_CXXFLAGS variable
-         */
-        if let Some(env_cxxflags) = option_env!("LLVM_CXXFLAGS") {
-            cxxflags.append(&mut env_cxxflags.split_whitespace().map(String::from).collect());
-        }
-    }
-
-    let sdk_path;
-    if env::var("CARGO_CFG_TARGET_VENDOR").unwrap().as_str() == "apple" {
-        // Needed on macos.
-        // Explanation at https://github.com/banach-space/llvm-tutor/blob/787b09ed31ff7f0e7bdd42ae20547d27e2991512/lib/CMakeLists.txt#L59
-        ldflags.push("-undefined");
-        ldflags.push("dynamic_lookup");
-
-        // In case the system is configured oddly, we may have trouble finding the SDK. Manually add the linker flag, just in case.
-        sdk_path = find_macos_sdk_libs();
-        ldflags.push(&sdk_path);
-    }
-
-    build_pass(
-        bindir_path,
-        out_dir,
-        &cxxflags,
-        &ldflags,
-        src_dir,
-        "transform-pass.cc",
-        None,
-        true,
-    );
-
-    build_pass(
-        bindir_path,
-        out_dir,
-        &cxxflags,
-        &ldflags,
-        src_dir,
-        "syscall-pass.cc",
-        None,
-        true,
-    );
 }

@@ -264,13 +264,6 @@ impl ToolWrapper for ClangWrapper {
             && suppress_linking < 1337
         {
             linking = false;
-            new_args.push(
-                PathBuf::from(env!("OUT_DIR"))
-                    .join(format!("{LIB_PREFIX}no-link-rt.{LIB_EXT}"))
-                    .into_os_string()
-                    .into_string()
-                    .unwrap(),
-            );
         }
 
         self.linking = linking;
