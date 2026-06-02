@@ -22,11 +22,48 @@ fn dll_extension<'a>() -> &'a str {
 
 include!(concat!(env!("OUT_DIR"), "/clang_constants.rs"));
 
-/// The supported LLVM passes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LLVMPasses {
-    Transform,
-    Syscall,
+/// An LLVM pass for the wrapper to load, identified by the basename of its
+/// compiled plugin — looked up next to the wrapper or in `../lib/`, with the
+/// platform's dynamic library extension appended.
+///
+/// [`transform`](LLVMPass::transform) and [`syscall`](LLVMPass::syscall) name
+/// the passes shipped with Almond; [`new`](LLVMPass::new) takes any other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LLVMPass {
+    name: String,
+}
+
+impl LLVMPass {
+    /// A pass identified by its plugin basename (e.g. `"my-pass"` resolves to
+    /// `my-pass.so` / `.dylib` / `.dll`).
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// Almond's built-in `transform-pass`.
+    #[must_use]
+    pub fn transform() -> Self {
+        Self::new("transform-pass")
+    }
+
+    /// Almond's built-in `syscall-pass`.
+    #[must_use]
+    pub fn syscall() -> Self {
+        Self::new("syscall-pass")
+    }
+
+    /// The basename of the pass plugin to load.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Gets the path of the LLVM pass
+    #[must_use]
+    pub fn path(&self) -> PathBuf {
+        find_pass(&self.name).unwrap_or_else(|| panic!("Could not find {}", self.name))
+    }
 }
 
 fn find_pass(pass_name: &str) -> Option<PathBuf> {
@@ -56,19 +93,6 @@ fn find_pass(pass_name: &str) -> Option<PathBuf> {
     None
 }
 
-impl LLVMPasses {
-    /// Gets the path of the LLVM pass
-    #[must_use]
-    pub fn path(&self) -> PathBuf {
-        match self {
-            LLVMPasses::Transform => {
-                find_pass("transform-pass").expect("Could not find transform-pass")
-            }
-            LLVMPasses::Syscall => find_pass("syscall-pass").expect("Could not find syscall-pass"),
-        }
-    }
-}
-
 /// Wrap Clang
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug)]
@@ -95,7 +119,7 @@ pub struct ClangWrapper {
     base_args: Vec<String>,
     cc_args: Vec<String>,
     link_args: Vec<String>,
-    passes: Vec<LLVMPasses>,
+    passes: Vec<LLVMPass>,
     passes_args: Vec<String>,
     passes_linking_args: Vec<String>,
 }
@@ -572,7 +596,7 @@ impl ClangWrapper {
     }
 
     /// Add LLVM pass
-    pub fn add_pass(&mut self, pass: LLVMPasses) -> &'_ mut Self {
+    pub fn add_pass(&mut self, pass: LLVMPass) -> &'_ mut Self {
         self.passes.push(pass);
         self
     }

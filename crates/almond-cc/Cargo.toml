@@ -3,6 +3,10 @@ name = "almond-cc"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "almond_cc"
+crate-type = ["lib"]
+
 [build-dependencies]
 cc = { workspace = true, features = ["parallel"] }
 which = "8.0.0"
