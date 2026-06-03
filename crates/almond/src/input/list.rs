@@ -33,7 +33,6 @@ impl<I> Default for CallsInput<I> {
     }
 }
 
-#[allow(dead_code)]
 impl<I> CallsInput<I> {
     /// Create a new empty [`CallsInput`].
     #[must_use]
@@ -189,7 +188,6 @@ where
 ///
 ///  If the input is empty, [`MutationResult::Skipped`] is returned.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct LastEntryMutator<M> {
     inner: M,
     name: Cow<'static, str>,
@@ -226,7 +224,6 @@ where
 
 /// Mapping functor to convert mutators to [`LastEntryMutator`].
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ToLastEntryMutator;
 
 impl<M: Named> MappingFunctor<M> for ToLastEntryMutator {
@@ -247,7 +244,6 @@ impl<M> Named for LastEntryMutator<M> {
 ///
 ///  If the input is empty, [`MutationResult::Skipped`] is returned.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct RandomEntryMutator<M> {
     inner: M,
     name: Cow<'static, str>,
@@ -289,7 +285,6 @@ where
 
 /// Mapping functor to convert mutators to [`RandomEntryMutator`].
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ToRandomEntryMutator;
 
 impl<M: Named> MappingFunctor<M> for ToRandomEntryMutator {

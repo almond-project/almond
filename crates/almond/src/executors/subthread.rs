@@ -166,21 +166,26 @@ pub fn sandwitch(f: impl FnOnce() -> Result<ExitKind, Error>) -> Result<ExitKind
 ///
 /// # Example
 ///
-/// ```rust
-/// use libafl::executors::{ExitKind, InProcessExecutor};
-/// use libafl::inputs::BytesInput;
+/// ```ignore
+/// use std::time::Duration;
 ///
-/// let harness = |input: &BytesInput| {
+/// use almond::executors::subthread::SubthreadInProcessExecutor;
+/// use libafl::executors::ExitKind;
+/// use libafl::inputs::BytesInput;
+/// use libafl_bolts::tuples::tuple_list;
+///
+/// let mut harness = |input: &BytesInput| {
 ///     // Your target code here
 ///     ExitKind::Ok
 /// };
 ///
-/// let executor = SubthreadInProcessExecutor::new(
-///     harness,
-///     observers,
+/// let executor = SubthreadInProcessExecutor::with_timeout(
+///     &mut harness,
+///     tuple_list!(observer),
 ///     &mut fuzzer,
 ///     &mut state,
 ///     &mut event_mgr,
+///     Duration::from_secs(10),
 /// )?;
 /// ```
 pub struct SubthreadInProcessExecutor<'a, EM, H, I, OT, S, Z>
@@ -294,7 +299,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```ignore
     /// use std::time::Duration;
     ///
     /// let executor = SubthreadInProcessExecutor::with_timeout(

@@ -19,7 +19,9 @@ use libafl_bolts::{
 };
 
 use crate::{input::AlmondInput, mutations::mapping::ToAlmondTargetedBytesMutator};
-use crossover::AlmondCrossoverInsertMutator;
+pub use crossover::{
+    AlmondCrossoverArgsMutator, AlmondCrossoverInsertMutator, AlmondCrossoverReplaceMutator,
+};
 
 pub mod calls;
 pub mod crossover;

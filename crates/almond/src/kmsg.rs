@@ -46,7 +46,7 @@ pub fn init() -> bool {
         .get_or_init(|| {
             let fd = unsafe {
                 libc::open(
-                    b"/dev/kmsg\0".as_ptr() as *const libc::c_char,
+                    c"/dev/kmsg".as_ptr(),
                     libc::O_RDONLY | libc::O_NONBLOCK,
                 )
             };

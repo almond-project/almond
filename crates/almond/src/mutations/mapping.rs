@@ -266,7 +266,6 @@ where
 
 /// Mapping functor to convert calls mutators to [`AlmondCallsMutator`].
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ToAlmondCallsMutator;
 
 impl<M: Named> MappingFunctor<M> for ToAlmondCallsMutator {

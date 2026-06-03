@@ -82,7 +82,6 @@ impl Named for CallReorderMutator {
 
 /// Mutator that reverses the order of all calls within a syscall
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct CallReverseMutator {
     name: Cow<'static, str>,
 }
@@ -90,7 +89,6 @@ pub struct CallReverseMutator {
 impl CallReverseMutator {
     /// Create a new [`CallReverseMutator`]
     #[must_use]
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             name: Cow::Borrowed("CallReverseMutator"),
@@ -366,7 +364,6 @@ impl Named for CallCrossoverMutator {
 
 /// Mutator that creates a new call with minimal valid data
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct CallCreateMutator {
     name: Cow<'static, str>,
 }
@@ -374,7 +371,6 @@ pub struct CallCreateMutator {
 impl CallCreateMutator {
     /// Create a new [`CallCreateMutator`]
     #[must_use]
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             name: Cow::Borrowed("CallCreateMutator"),
