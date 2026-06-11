@@ -47,7 +47,9 @@ const DEFAULT_SIZE: usize = 1 << 16;
 /// - Full when `head - tail == capacity`
 pub struct CoverageRing {
     /// The underlying buffer, wrapped in UnsafeCell for interior mutability
-    buffer: UnsafeCell<Box<[u64; DEFAULT_SIZE]>>,
+    buffer: UnsafeCell<Box<[u64]>>,
+    /// Number of entries the buffer holds (`buffer.len()`, cached for the hot path)
+    capacity: usize,
     /// Next write position (producer)
     head: AtomicUsize,
     /// Next read position (consumer)
@@ -59,19 +61,27 @@ pub struct CoverageRing {
 impl fmt::Debug for CoverageRing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CoverageRing")
-            .field("capacity", &DEFAULT_SIZE)
+            .field("capacity", &self.capacity)
             .field("len", &self.len())
             .finish_non_exhaustive()
     }
 }
 
 impl CoverageRing {
-    /// Create a new ring buffer with default capacity.
-    ///
-    /// The default capacity is 64K entries (~512KB).
+    /// Create a new ring buffer with the default capacity of 64K entries (~512KB).
     pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_SIZE)
+    }
+
+    /// Create a new ring buffer holding `capacity` entries.
+    ///
+    /// Size this up when coverage bursts overflow the default (watch
+    /// [`drain_overflow`](Self::drain_overflow)). Panics if `capacity` is zero.
+    pub fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0, "CoverageRing capacity must be non-zero");
         Self {
-            buffer: UnsafeCell::new(Box::new([0u64; DEFAULT_SIZE])),
+            buffer: UnsafeCell::new(vec![0u64; capacity].into_boxed_slice()),
+            capacity,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             overflow_count: AtomicU64::new(0),
@@ -81,7 +91,7 @@ impl CoverageRing {
     /// Returns the capacity of the ring buffer.
     #[inline]
     pub fn capacity(&self) -> usize {
-        DEFAULT_SIZE
+        self.capacity
     }
 
     /// Atomically drain the overflow counter, returning the number of entries
@@ -112,7 +122,7 @@ impl CoverageRing {
 
         // Check if full
         let next_head = head.wrapping_add(1);
-        if next_head.wrapping_sub(tail) > DEFAULT_SIZE {
+        if next_head.wrapping_sub(tail) > self.capacity {
             self.overflow_count.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -120,7 +130,7 @@ impl CoverageRing {
         // Safety: We're the only producer (SPSC), and we've verified there's space.
         // The index is always within bounds because we use modular arithmetic.
         // The consumer won't read this position until we update head with Release ordering.
-        let idx = head % DEFAULT_SIZE;
+        let idx = head % self.capacity;
         unsafe {
             let buffer = &mut *self.buffer.get();
             (*buffer)[idx] = value;
@@ -165,7 +175,7 @@ impl CoverageRing {
         unsafe {
             let buffer = &*self.buffer.get();
             for i in 0..count {
-                let idx = (tail + i) % DEFAULT_SIZE;
+                let idx = (tail + i) % self.capacity;
                 out.push(buffer[idx]);
             }
         }
@@ -219,7 +229,8 @@ const SIGNAL_DEFAULT_SIZE: usize = 1 << 14;
 /// *newly-seen* slot indices lets the Python manager aggregate unique edge
 /// coverage across multiple VMs without recomputing edges from BB addresses.
 pub struct SignalRing {
-    buffer: UnsafeCell<Box<[u32; SIGNAL_DEFAULT_SIZE]>>,
+    buffer: UnsafeCell<Box<[u32]>>,
+    capacity: usize,
     head: AtomicUsize,
     tail: AtomicUsize,
     overflow_count: AtomicU64,
@@ -228,16 +239,26 @@ pub struct SignalRing {
 impl fmt::Debug for SignalRing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SignalRing")
-            .field("capacity", &SIGNAL_DEFAULT_SIZE)
+            .field("capacity", &self.capacity)
             .field("len", &self.len())
             .finish_non_exhaustive()
     }
 }
 
 impl SignalRing {
+    /// Create a new ring buffer with the default capacity of 16K entries (64KB).
     pub fn new() -> Self {
+        Self::with_capacity(SIGNAL_DEFAULT_SIZE)
+    }
+
+    /// Create a new ring buffer holding `capacity` entries.
+    ///
+    /// Panics if `capacity` is zero.
+    pub fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0, "SignalRing capacity must be non-zero");
         Self {
-            buffer: UnsafeCell::new(Box::new([0u32; SIGNAL_DEFAULT_SIZE])),
+            buffer: UnsafeCell::new(vec![0u32; capacity].into_boxed_slice()),
+            capacity,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             overflow_count: AtomicU64::new(0),
@@ -246,7 +267,7 @@ impl SignalRing {
 
     #[inline]
     pub fn capacity(&self) -> usize {
-        SIGNAL_DEFAULT_SIZE
+        self.capacity
     }
 
     pub fn drain_overflow(&self) -> u64 {
@@ -258,11 +279,11 @@ impl SignalRing {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
         let next_head = head.wrapping_add(1);
-        if next_head.wrapping_sub(tail) > SIGNAL_DEFAULT_SIZE {
+        if next_head.wrapping_sub(tail) > self.capacity {
             self.overflow_count.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        let idx = head % SIGNAL_DEFAULT_SIZE;
+        let idx = head % self.capacity;
         unsafe {
             (*self.buffer.get())[idx] = value;
         }
@@ -282,7 +303,7 @@ impl SignalRing {
         unsafe {
             let buffer = &*self.buffer.get();
             for i in 0..count {
-                out.push(buffer[(tail + i) % SIGNAL_DEFAULT_SIZE]);
+                out.push(buffer[(tail + i) % self.capacity]);
             }
         }
         self.tail.store(head, Ordering::Release);

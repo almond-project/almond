@@ -7,6 +7,18 @@ use crate::ring::CoverageRing;
 
 static COVERAGE_RING: OnceLock<Arc<CoverageRing>> = OnceLock::new();
 
+/// Size the global coverage ring before fuzzing starts.
+///
+/// Optional: the ring is lazily created with [`CoverageRing::new`]'s default
+/// capacity on first [`push_if_new`] if this is never called. Call once at
+/// startup, before any push, when the default overflows (watch
+/// [`drain_overflow`]). Returns `false` if the ring was already initialized.
+pub fn init_with_capacity(capacity: usize) -> bool {
+    COVERAGE_RING
+        .set(Arc::new(CoverageRing::with_capacity(capacity)))
+        .is_ok()
+}
+
 /// Process-local set of BB addresses already forwarded to the manager.
 /// Not fuzzer state — resets when the process restarts (e.g. on VM snapshot restore).
 /// Cross-VM aggregation is the Python manager's responsibility.
