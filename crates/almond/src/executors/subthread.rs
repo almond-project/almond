@@ -33,6 +33,13 @@ struct SingleThreadPool {
     result_receiver: Mutex<Receiver<Result<ExitKind, Error>>>,
     /// Handle to the worker thread
     _worker_handle: JoinHandle<()>,
+    /// PID of the process that created this pool.
+    ///
+    /// `fork()` (used by LibAFL's restarting manager) only clones the calling
+    /// thread, so the worker thread does not survive into the child while this
+    /// struct's channels do. A mismatch between this and the current PID means
+    /// the worker thread is dead and the pool must be recreated.
+    owner_pid: u32,
 }
 
 type Job = Box<dyn FnOnce() -> Result<ExitKind, Error> + Send>;
@@ -74,6 +81,7 @@ impl SingleThreadPool {
             job_sender,
             result_receiver: Mutex::new(result_receiver),
             _worker_handle: worker_handle,
+            owner_pid: std::process::id(),
         })
     }
 
@@ -99,18 +107,31 @@ impl SingleThreadPool {
     }
 }
 
-// Safety: SingleThreadPool is Sync because:
-// - job_sender is Send+Sync (crossbeam Sender)
-// - result_receiver is protected by Mutex
-// - _worker_handle is only used for cleanup
-unsafe impl Sync for SingleThreadPool {}
-
 /// Global single-thread pool instance.
-static POOL: std::sync::OnceLock<SingleThreadPool> = std::sync::OnceLock::new();
+///
+/// Stored as `Mutex<Option<..>>` rather than a `OnceLock` so it can be lazily
+/// (re)created. After a `fork()` the inherited pool's worker thread is gone, so
+/// the child must replace the stale pool with a fresh one (see [`with_pool`]).
+static POOL: Mutex<Option<SingleThreadPool>> = Mutex::new(None);
 
-/// Get or initialize the global thread pool.
-fn get_pool() -> &'static SingleThreadPool {
-    POOL.get_or_init(|| SingleThreadPool::new().expect("Failed to create thread pool"))
+/// Run `f` against the process-local thread pool, creating it on first use and
+/// recreating it after a `fork()`.
+///
+/// LibAFL's restarting manager forks worker children. `fork()` only clones the
+/// calling thread, so a pool inherited from the parent has a dead worker thread:
+/// sending a job to it would block forever waiting for a result that never
+/// comes. By keying the pool on the creating process's PID we detect that case
+/// and spawn a fresh worker thread (with KCov re-initialized) in the child.
+fn with_pool<R>(f: impl FnOnce(&SingleThreadPool) -> R) -> R {
+    let mut guard = POOL.lock().expect("Thread pool mutex poisoned");
+    let current_pid = std::process::id();
+    let stale = guard
+        .as_ref()
+        .is_none_or(|pool| pool.owner_pid != current_pid);
+    if stale {
+        *guard = Some(SingleThreadPool::new().expect("Failed to create thread pool"));
+    }
+    f(guard.as_ref().expect("Thread pool just initialized"))
 }
 
 /// Executes a function in the worker thread with KCov already initialized.
@@ -131,8 +152,6 @@ pub fn sandwitch(f: impl FnOnce() -> Result<ExitKind, Error>) -> Result<ExitKind
         libc::sigaddset(&mut set, libc::SIGALRM);
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
-    let pool = get_pool();
-
     // Safety: We transmute the closure to Send. This is safe because:
     // 1. The pool processes jobs sequentially (single thread)
     // 2. The main thread waits for completion before continuing
@@ -144,7 +163,7 @@ pub fn sandwitch(f: impl FnOnce() -> Result<ExitKind, Error>) -> Result<ExitKind
         >(Box::new(f))
     };
 
-    pool.execute(job)
+    with_pool(|pool| pool.execute(job))
 }
 
 /// A wrapper executor that encapsulates an InProcessExecutor as its inner executor.
