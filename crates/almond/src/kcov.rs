@@ -166,13 +166,14 @@ impl KCov {
 
         debug_assert!(current_len < COVER_SIZE as u64);
 
-        // Disable coverage tracking
-        unsafe {
-            ioctl(&self.file, IntegerSetter::<KCOV_DISABLE>::new_usize(0))
-                .context("Failed to disable Kcov")?;
-        }
-
+        // Disable coverage tracking. Clear `enabled` even if the ioctl fails:
+        // KCOV is per-task, so a disable issued from a different task than the
+        // one that enabled returns EINVAL. In that case this task no longer
+        // owns an active session, so the struct's view must reset regardless —
+        // otherwise the next enable() would trip the "already enabled" guard.
+        let res = unsafe { ioctl(&self.file, IntegerSetter::<KCOV_DISABLE>::new_usize(0)) };
         self.enabled = false;
+        res.context("Failed to disable Kcov")?;
 
         Ok(current_len as usize)
     }

@@ -86,12 +86,27 @@ where
         // so that run_observers_and_save_state can finish and _exit(55) cleanly.
         let mut remote_kcov = match get_remote_kcov().try_lock() {
             Ok(guard) => guard,
-            Err(_) => return Ok(()),
+            Err(_) => {
+                // Contended only in signal-handler context (the timeout path);
+                // skip this run's coverage rather than block.
+                self.remote_len = 0;
+                return Ok(());
+            }
         };
 
+        // KCOV is per-task: a disable issued from a different task than the one
+        // that enabled (e.g. the worker thread's timeout signal handler vs. the
+        // main thread that enabled) returns EINVAL. That run's coverage is being
+        // discarded anyway — auto-disable on task exit handles kernel cleanup
+        // and the next enable() resets the counter — so log and skip rather than
+        // failing. Mirrors `post_exec_child` for the syscall KCov.
         let len = match remote_kcov.disable() {
             Ok(len) => len,
-            Err(_) => return Ok(()),
+            Err(e) => {
+                log::warn!("remote KCov disable failed, skipping coverage: {e:?}");
+                self.remote_len = 0;
+                return Ok(());
+            }
         };
         let coverage_ptr = remote_kcov.ptr();
         self.remote_len = len;
@@ -129,15 +144,22 @@ where
         _exit_kind: &ExitKind,
     ) -> Result<(), Error> {
         let kcov = get_syscall_kcov()?;
-        let (coverage_ptr, len) = (
-            kcov.ptr(),
-            kcov.disable().map_err(|e| {
-                Error::Runtime(
-                    format!("Failed to disable syscall KCov: {}", e),
-                    ErrorBacktrace::new(),
-                )
-            })?,
-        );
+        // KCOV is per-task: a disable issued from a different task than the one
+        // that enabled (e.g. a testcase-spawned thread, or teardown after the
+        // worker forked) returns EINVAL. That run's coverage is untrustworthy
+        // and being discarded anyway — auto-disable on task exit handles kernel
+        // cleanup and the next enable() resets the counter — so log and skip
+        // rather than failing the execution. This should never fire on the
+        // normal same-task path; a warning here flags a real regression.
+        let len = match kcov.disable() {
+            Ok(len) => len,
+            Err(e) => {
+                log::warn!("syscall KCov disable failed, skipping coverage: {e:?}");
+                self.syscall_len = 0;
+                return Ok(());
+            }
+        };
+        let coverage_ptr = kcov.ptr();
         self.syscall_len = len;
 
         let mut prev = 0u64;
