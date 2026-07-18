@@ -14,6 +14,45 @@ use crate::input::AlmondInput;
 // AtomicPtr has no lock to leak, so longjmp is harmless.
 pub static CURRENT_INPUT: AtomicPtr<AlmondInput> = AtomicPtr::new(std::ptr::null_mut());
 
+/// RAII guard that blocks `SIGALRM` for the duration of a critical section.
+///
+/// The `CURRENT_INPUT` pointer is lock-free, but the `AlmondInput` it points at
+/// is not: `begin_syscall`, `get`, `capture`, etc. all take the inner `RwLock`
+/// write lock (and `begin_syscall` additionally locks the syscall-tree
+/// `Mutex`). `InProcessExecutor` enforces timeouts with `setitimer` + `SIGALRM`,
+/// whose handler `longjmp`s back to the executor's `setjmp` point. If that fires
+/// while one of those locks is held, the `longjmp` skips the guard's destructor
+/// and the lock is never released — every subsequent `fuzz()` call then
+/// deadlocks on it. Blocking `SIGALRM` across the locked section keeps the
+/// timeout pending until the guard is dropped and the lock is released, at which
+/// point the signal is delivered and `longjmp` fires safely.
+struct SigAlrmGuard {
+    prev: libc::sigset_t,
+}
+
+impl SigAlrmGuard {
+    fn new() -> Self {
+        unsafe {
+            let mut block: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut block);
+            libc::sigaddset(&mut block, libc::SIGALRM);
+            let mut prev: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut prev);
+            Self { prev }
+        }
+    }
+}
+
+impl Drop for SigAlrmGuard {
+    fn drop(&mut self) {
+        // Restore the previous mask. If a SIGALRM arrived while blocked it is
+        // still pending and gets delivered here, after the lock is released.
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.prev, std::ptr::null_mut());
+        }
+    }
+}
+
 unsafe extern "C" {
     // real main function of the target source
     fn almond_shell(argc: i32, argv: *const *const u8);
@@ -69,6 +108,11 @@ pub unsafe extern "C" fn fuzz(buffer: *mut u8, syscall_no: i32, arg_no: i32, siz
     }
     let input_data = unsafe { &*ptr };
 
+    // Hold off the timeout SIGALRM while we touch the lock-protected input
+    // state below, so a longjmp can't strand a held lock and deadlock the
+    // next execution. Dropped at end of scope, before returning to target.
+    let _sigalrm_guard = SigAlrmGuard::new();
+
     // On the first argument of each syscall, record the syscall in the
     // access sequence and check if this is a new path (enables capture).
     if arg_no_u32 == 0 {
@@ -113,6 +157,9 @@ pub extern "C" fn advance_offset(syscall_no: i32) {
     }
     let input_data = unsafe { &*ptr };
 
+    // Same rationale as fuzz(): keep the timeout from longjmp-ing out while the
+    // input's write lock is held. See SigAlrmGuard.
+    let _sigalrm_guard = SigAlrmGuard::new();
     input_data.advance_offset_for_syscall(syscall_no_u32);
 }
 
