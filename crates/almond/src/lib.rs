@@ -10,6 +10,7 @@ pub use hashbrown;
 
 pub mod executors;
 pub mod feedbacks;
+pub mod focus;
 pub mod input;
 pub mod ivshmem;
 pub mod kcov;

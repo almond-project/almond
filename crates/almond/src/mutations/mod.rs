@@ -116,9 +116,12 @@ where
     ) -> Result<MutationResult, Error> {
         let mut r = MutationResult::Skipped;
         let num = self.iterations(state, input);
+        // The focus depends only on what the last run read, which no mutator
+        // changes, so one focus serves every round.
+        let focus = input.focus();
         for _ in 0..num {
             let idx = self.schedule(state, input);
-            input.select_syscall_id(state);
+            input.set_current_syscall_id(focus.select(state.rand_mut()));
             let outcome = self.mutations_mut().get_and_mutate(idx, state, input)?;
             if outcome == MutationResult::Mutated {
                 r = MutationResult::Mutated;

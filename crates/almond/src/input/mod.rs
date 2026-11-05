@@ -2,16 +2,12 @@
 // Copyright (c) 2025 Almond Contributors.
 
 use hashbrown::{HashMap, HashSet};
-use libafl::{
-    inputs::{BytesInput, Input},
-    state::HasRand,
-};
-use libafl_bolts::{HasLen, rands::Rand};
+use libafl::inputs::{BytesInput, Input};
+use libafl_bolts::HasLen;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     hash::{Hash, Hasher},
-    num::NonZero,
     sync::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -26,7 +22,7 @@ pub mod list;
 
 use list::CallsInput;
 
-use crate::syscall_tree;
+use crate::{focus::Focus, skipped_args, syscall_tree};
 
 pub const NUM_ARGS: usize = 6;
 
@@ -58,6 +54,9 @@ pub struct AlmondInputInner {
     // Mutation indicators collected during execution - Vec preserves order
     // to identify roadblocks (last accessed = likely roadblock)
     pub accessed_indicators: Vec<SyscallID>,
+    // Syscalls that read bytes from an argument outside skipped_args during
+    // execution, so mutating them changes what the target sees
+    pub mutable_indicators: HashSet<SyscallID>,
     #[serde(skip)]
     pub insufficient_calls_indicators: HashSet<SyscallID>,
     // SyscallID, Offset, ArgNo, ExpectedLen
@@ -140,6 +139,10 @@ impl AlmondInput {
     pub fn get(&self, syscall_no: u32, arg_no: u32, expected_len: usize) -> BytesInput {
         let mut inner = self.inner.write().unwrap();
         inner.current = syscall_no;
+        // fuzz() only reads unskipped args through here, so the mutators can
+        // change what this syscall sees, even before the input holds a call
+        // for it: the miss below asks crossover to import one.
+        inner.mutable_indicators.insert(syscall_no);
 
         // Continuous-buffer model: parts[offset][arg_no] is a single byte
         // stream. Multiple fuzz() calls within one syscall (msghdr's
@@ -169,6 +172,7 @@ impl AlmondInput {
             });
 
         let Some((calls_len, real_offset, mut bytes)) = snapshot else {
+            inner.insufficient_calls_indicators.insert(syscall_no);
             return BytesInput::new(vec![0u8; expected_len]);
         };
         let take = bytes.len();
@@ -177,7 +181,9 @@ impl AlmondInput {
         }
 
         inner.cursors.insert((syscall_no, arg_no), cursor + take);
-        if offset > calls_len {
+        // offset counts the calls before this one, so this one needs
+        // offset + 1 stored calls.
+        if offset >= calls_len {
             inner.insufficient_calls_indicators.insert(syscall_no);
         }
         if take < expected_len {
@@ -197,6 +203,7 @@ impl AlmondInput {
         let mut inner = self.inner.write().unwrap();
         inner.offsets.clear();
         inner.accessed_indicators.clear();
+        inner.mutable_indicators.clear();
         inner.insufficient_calls_indicators.clear();
         inner.insufficient_bytes_indicators.clear();
         inner.capturing = false;
@@ -238,24 +245,17 @@ impl AlmondInput {
         inner.cursors.retain(|(s, _), _| *s != syscall_no);
     }
 
-    pub fn select_syscall_id<S: HasRand>(&self, state: &mut S) {
-        let mut inner = self.inner.write().unwrap();
-        let accessed = &inner.accessed_indicators;
-
-        let accessed_len = NonZero::new(accessed.len())
-            .expect("select_syscall_id called with empty accessed_indicators — mutator invoked before any syscall ran");
-
-        // Heuristic: 50% chance to select the last accessed syscall (likely roadblock),
-        // 50% chance to select a random one from the accessed list.
-        let last_idx = accessed.len() - 1;
-        let select_last = state.rand_mut().below(NonZero::new(10).unwrap()) < 5;
-
-        if select_last {
-            inner.current = accessed[last_idx];
-        } else {
-            let idx = state.rand_mut().below(accessed_len);
-            inner.current = accessed[idx];
-        }
+    /// Work out which accessed syscalls a round of mutation may aim at. See
+    /// [`crate::focus`].
+    ///
+    /// # Panics
+    ///
+    /// If no syscall has run yet.
+    pub fn focus(&self) -> Focus {
+        let inner = self.inner.read().unwrap();
+        Focus::new(&inner.accessed_indicators, |id| {
+            inner.mutable_indicators.contains(&id)
+        })
     }
 
     pub fn current_syscall_id(&self) -> u32 {
@@ -294,6 +294,9 @@ impl AlmondInput {
     /// so the mutation engine has real values as the base for future mutations.
     pub fn capture(&self, syscall_no: u32, arg_no: u32, data: &[u8]) {
         let mut inner = self.inner.write().unwrap();
+        if !skipped_args::is_skipped(syscall_no, arg_no) {
+            inner.mutable_indicators.insert(syscall_no);
+        }
         let offset = inner.offsets.get(&syscall_no).copied().unwrap_or(0);
 
         let calls = inner
@@ -338,3 +341,66 @@ impl HasLen for AlmondInput {
 }
 
 impl Input for AlmondInput {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libafl_bolts::rands::StdRand;
+
+    const SOCKET: SyscallID = 41;
+    const ACCEPT: SyscallID = 43;
+    const CLOSE: SyscallID = 3;
+
+    fn input_that_reached(accessed: &[SyscallID]) -> AlmondInput {
+        let input = AlmondInput::new();
+        input.inner.write().unwrap().accessed_indicators = accessed.to_vec();
+        input
+    }
+
+    #[test]
+    fn a_read_makes_a_syscall_mutable_before_the_input_holds_bytes_for_it() {
+        // Another input captured this sequence first, so this one holds no
+        // bytes for accept(), but the run reads its addr buffer.
+        let input = input_that_reached(&[SOCKET, ACCEPT, CLOSE]);
+        input.get(ACCEPT, 1, 16);
+
+        let focus = input.focus();
+        let mut rand = StdRand::with_seed(42);
+        assert!((0..100).all(|_| focus.select(&mut rand) == ACCEPT));
+    }
+
+    #[test]
+    fn a_read_with_no_stored_call_asks_for_one() {
+        let input = input_that_reached(&[SOCKET, ACCEPT]);
+
+        input.get(ACCEPT, 1, 16);
+
+        assert!(input.insufficient_calls_indicators().contains(&ACCEPT));
+    }
+
+    #[test]
+    fn a_call_beyond_the_stored_ones_asks_for_another() {
+        let call = std::array::from_fn(|_| BytesInput::new(vec![0u8; 4]));
+        let input = AlmondInput::with_syscall(ACCEPT, call);
+
+        input.get(ACCEPT, 1, 4);
+        assert!(
+            input.insufficient_calls_indicators().is_empty(),
+            "the stored call covers the first accept()"
+        );
+
+        input.advance_offset_for_syscall(ACCEPT);
+        input.get(ACCEPT, 1, 4);
+        assert!(input.insufficient_calls_indicators().contains(&ACCEPT));
+    }
+
+    #[test]
+    fn reset_forgets_reads() {
+        let input = input_that_reached(&[ACCEPT]);
+        input.get(ACCEPT, 1, 16);
+
+        input.reset();
+
+        assert!(input.inner.read().unwrap().mutable_indicators.is_empty());
+    }
+}
