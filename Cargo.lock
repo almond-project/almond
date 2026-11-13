@@ -57,6 +57,7 @@ dependencies = [
  "libafl_bolts",
  "libc",
  "log",
+ "postcard",
  "rustix",
  "serde",
  "serde_json",

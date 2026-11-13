@@ -54,11 +54,16 @@ impl Focus {
         Self { pool }
     }
 
+    /// The last call the run reached among those worth aiming at.
+    pub fn roadblock(&self) -> SyscallID {
+        *self.pool.last().expect("the pool is never empty")
+    }
+
     /// Heuristic: 50% chance to select the roadblock, 50% chance to select a
     /// random access from the pool.
     pub fn select<R: Rand>(&self, rand: &mut R) -> SyscallID {
         if rand.below(NonZero::new(10).unwrap()) < 5 {
-            return *self.pool.last().expect("the pool is never empty");
+            return self.roadblock();
         }
         let len = NonZero::new(self.pool.len()).expect("the pool is never empty");
         self.pool[rand.below(len)]
@@ -143,6 +148,17 @@ mod tests {
 
         assert_share(&shares, CLOSE, 0.75);
         assert_share(&shares, DUP, 0.25);
+    }
+
+    #[test]
+    fn roadblock_is_the_last_mutable_access() {
+        let focus = Focus::new(&[SOCKET, CONNECT, CLOSE], |s| {
+            [SOCKET, CONNECT].contains(&s)
+        });
+        assert_eq!(focus.roadblock(), CONNECT);
+
+        let fallback = Focus::new(&[DUP, CLOSE], |_| false);
+        assert_eq!(fallback.roadblock(), CLOSE);
     }
 
     #[test]

@@ -24,10 +24,15 @@
 // QEMU device (`-device ivshmem-plain` backing memory) to match, or shrink the
 // config. `init` warns when the mapped device is smaller than the config needs.
 //
-// Pre-exec section wire format (little-endian):
+// Slot wire format, the same for the pre-exec slot and every ring slot
+// (little-endian):
 //   bytes 0..4:   magic  0x46414952 ("FAIR")
 //   bytes 4..8:   length of JSON payload (u32)
-//   bytes 8..8+N: JSON payload (AlmondInputInner)
+//   bytes 8..8+N: JSON payload: the AlmondInputInner keys (including its
+//                 `lineage`) plus `exec_index`
+// A ring slot the kmsg detector wrote after its input ran also carries
+// `kmsg_detected: true`. The pre-exec slot and the ring slots written before
+// each execution never do.
 //
 // Crash ring header (16 bytes):
 //   bytes 0..4:   ring_magic  0x52494E47 ("RING")
@@ -49,7 +54,10 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::input::AlmondInput;
+use serde::Serialize;
+
+use crate::input::{AlmondInput, AlmondInputInner};
+use crate::telemetry;
 
 const MAGIC: u32 = 0x4641_4952; // "FAIR" in LE
 const HEADER_SIZE: usize = 8; // magic(4) + len(4)
@@ -167,7 +175,7 @@ pub fn write_input(input: &AlmondInput) {
     let Some(Some(ivshmem)) = BACKEND.get() else {
         return;
     };
-    let Some(json) = serialize(input) else {
+    let Some(json) = serialize(input, false) else {
         return;
     };
     let cfg = config();
@@ -241,16 +249,37 @@ pub fn write_crash_input(input: &AlmondInput) {
     let Some(Some(ivshmem)) = BACKEND.get() else {
         return;
     };
-    let Some(json) = serialize(input) else {
+    let Some(json) = serialize(input, true) else {
         return;
     };
     write_ring_slot(ivshmem, &json, &config());
 }
 
+/// What one slot holds: the input plus where it sits in the run.
+///
+/// The extra keys sit beside the input's own so readers that only look for
+/// the input's keys keep working.
+#[derive(Serialize)]
+struct SlotRecord<'a> {
+    #[serde(flatten)]
+    input: &'a AlmondInputInner,
+    /// [`telemetry::exec_index`] of the execution that ran this input.
+    exec_index: u64,
+    /// Set when the kmsg detector saved the input after it ran, as opposed to
+    /// the copy written before every execution.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    kmsg_detected: bool,
+}
+
 /// Serialize an input to JSON, logging on failure.
-fn serialize(input: &AlmondInput) -> Option<Vec<u8>> {
+fn serialize(input: &AlmondInput, kmsg_detected: bool) -> Option<Vec<u8>> {
     let inner = input.inner.read().unwrap();
-    match serde_json::to_vec(&*inner) {
+    let record = SlotRecord {
+        input: &inner,
+        exec_index: telemetry::exec_index(),
+        kmsg_detected,
+    };
+    match serde_json::to_vec(&record) {
         Ok(json) => Some(json),
         Err(e) => {
             eprintln!("[repro] Serialization failed: {e}");
@@ -388,4 +417,32 @@ fn map_bar(resource_path: &Path) -> Result<Ivshmem, String> {
         ptr: ptr as *mut u8,
         size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libafl::inputs::BytesInput;
+
+    #[test]
+    fn slot_record_adds_run_facts_beside_the_input_keys() {
+        let call = std::array::from_fn(|_| BytesInput::new(vec![3u8; 2]));
+        let input = AlmondInput::with_syscall(41, call);
+        telemetry::set_exec_index(1234);
+
+        let pre_exec: serde_json::Value =
+            serde_json::from_slice(&serialize(&input, false).unwrap()).unwrap();
+        assert_eq!(pre_exec["exec_index"], 1234);
+        assert_eq!(pre_exec["lineage"]["depth"], 0);
+        assert!(pre_exec.get("kmsg_detected").is_none());
+        assert!(pre_exec["map"].get("41").is_some());
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&serialize(&input, true).unwrap()).unwrap();
+        assert_eq!(saved["kmsg_detected"], true);
+
+        // The extra keys do not stop the record loading back as an input.
+        let back: AlmondInputInner = serde_json::from_value(saved).unwrap();
+        assert_eq!(back.map, input.inner.read().unwrap().map);
+    }
 }

@@ -13,7 +13,10 @@ use libafl::{
 };
 use libafl_bolts::{Named, rands::Rand, tuples::MappingFunctor};
 
-use crate::input::{Calls, AlmondInput, NUM_ARGS};
+use crate::{
+    input::{AlmondInput, Calls, NUM_ARGS},
+    telemetry::{Classified, MutationClass},
+};
 
 /// Mutator that applies mutations to bytes input within an AlmondInput.
 ///
@@ -280,4 +283,16 @@ impl<M> Named for AlmondCallsMutator<M> {
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }
+}
+
+impl<M> Classified for AlmondBytesMutator<M> {
+    const CLASS: MutationClass = MutationClass::Bytes;
+}
+
+impl<M> Classified for AlmondTargetedBytesMutator<M> {
+    const CLASS: MutationClass = MutationClass::Bytes;
+}
+
+impl<M> Classified for AlmondCallsMutator<M> {
+    const CLASS: MutationClass = MutationClass::Calls;
 }

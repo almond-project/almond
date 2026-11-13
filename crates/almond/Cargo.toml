@@ -12,6 +12,9 @@ integration = []
 remote = []
 future = []
 track_hit_feedbacks = []
+# Record per-round mutation telemetry (input lineage, roadblock focus). Off by
+# default: it adds a write lock on the input to every mutation round.
+telemetry = []
 
 [build-dependencies]
 cc = { workspace = true, features = ["parallel"] }
@@ -32,3 +35,6 @@ libc = "0.2"
 [lib]
 name = "almond"
 crate-type = ["lib"]
+
+[dev-dependencies]
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }

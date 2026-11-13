@@ -22,7 +22,11 @@ pub mod list;
 
 use list::CallsInput;
 
-use crate::{focus::Focus, skipped_args, syscall_tree};
+use crate::{
+    focus::Focus,
+    skipped_args, syscall_tree,
+    telemetry::{Lineage, RoundTally},
+};
 
 pub const NUM_ARGS: usize = 6;
 
@@ -67,6 +71,18 @@ pub struct AlmondInputInner {
     // mutating. Cleared by advance_offset() after the syscall completes.
     #[serde(skip)]
     pub capturing: bool,
+    // Position in accessed_indicators of the first syscall whose sequence
+    // was new to the syscall tree during this execution, i.e. where capture
+    // grew the program. Every later position is new too, so the first one
+    // is the growth point.
+    #[serde(skip)]
+    pub capture_growth: Option<u32>,
+    // Part of the serialized form, so it survives the corpus, a client
+    // restart and the broker. Postcard, which LibAFL uses for all three,
+    // reads fields in order: data written before this field existed does not
+    // load. Present in every build so corpora move between builds; only the
+    // `telemetry` feature advances it, otherwise it stays at the seed's.
+    pub lineage: Lineage,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -158,18 +174,14 @@ impl AlmondInput {
 
         // Snapshot the byte slice so the immutable borrow on inner.map
         // ends before the mutable updates below.
-        let snapshot: Option<(usize, usize, Vec<u8>)> =
-            inner.map.get(&syscall_no).map(|calls| {
-                let calls_len = calls.len();
-                let real_offset = offset % calls_len;
-                let stream = calls
-                    .part_at_index(real_offset)
-                    .unwrap()[arg_no as usize]
-                    .as_ref();
-                let take = expected_len.min(stream.len().saturating_sub(cursor));
-                let bytes = stream[cursor..cursor + take].to_vec();
-                (calls_len, real_offset, bytes)
-            });
+        let snapshot: Option<(usize, usize, Vec<u8>)> = inner.map.get(&syscall_no).map(|calls| {
+            let calls_len = calls.len();
+            let real_offset = offset % calls_len;
+            let stream = calls.part_at_index(real_offset).unwrap()[arg_no as usize].as_ref();
+            let take = expected_len.min(stream.len().saturating_sub(cursor));
+            let bytes = stream[cursor..cursor + take].to_vec();
+            (calls_len, real_offset, bytes)
+        });
 
         let Some((calls_len, real_offset, mut bytes)) = snapshot else {
             inner.insufficient_calls_indicators.insert(syscall_no);
@@ -207,6 +219,7 @@ impl AlmondInput {
         inner.insufficient_calls_indicators.clear();
         inner.insufficient_bytes_indicators.clear();
         inner.capturing = false;
+        inner.capture_growth = None;
         inner.cursors.clear();
     }
 
@@ -223,6 +236,10 @@ impl AlmondInput {
         let need_capture = syscall_tree::get().record_sequence(&inner.accessed_indicators);
         if need_capture {
             inner.capturing = true;
+            if inner.capture_growth.is_none() {
+                let position = inner.accessed_indicators.len() - 1;
+                inner.capture_growth = Some(u32::try_from(position).unwrap_or(u32::MAX));
+            }
         }
     }
 
@@ -326,6 +343,21 @@ impl AlmondInput {
     pub fn is_capturing(&self) -> bool {
         self.inner.read().unwrap().capturing
     }
+
+    /// Where in the run's syscall sequence the last execution first reached a
+    /// sequence the syscall tree had not seen, if it did.
+    pub fn capture_growth(&self) -> Option<u32> {
+        self.inner.read().unwrap().capture_growth
+    }
+
+    pub fn lineage(&self) -> Lineage {
+        self.inner.read().unwrap().lineage
+    }
+
+    /// Extend the lineage by one finished round of mutation.
+    pub fn record_round(&self, applied: &RoundTally) {
+        self.inner.write().unwrap().lineage.extend(applied);
+    }
 }
 
 impl HasLen for AlmondInput {
@@ -392,6 +424,95 @@ mod tests {
         input.advance_offset_for_syscall(ACCEPT);
         input.get(ACCEPT, 1, 4);
         assert!(input.insufficient_calls_indicators().contains(&ACCEPT));
+    }
+
+    #[test]
+    fn capture_growth_is_the_first_position_new_to_the_tree() {
+        // IDs no other test uses, so the global syscall tree starts empty
+        // below this prefix whatever order tests run in.
+        const OPEN: SyscallID = 9_001;
+        const READ: SyscallID = 9_002;
+        const IOCTL: SyscallID = 9_003;
+        let input = AlmondInput::new();
+        for id in [OPEN, READ] {
+            input.begin_syscall(id);
+            input.advance_offset_for_syscall(id);
+        }
+        input.reset();
+        assert_eq!(input.capture_growth(), None, "reset forgets the growth");
+
+        // The second run repeats the known prefix and grows at position 2.
+        for id in [OPEN, READ, IOCTL] {
+            input.begin_syscall(id);
+            input.advance_offset_for_syscall(id);
+        }
+        assert_eq!(input.capture_growth(), Some(2));
+
+        // A third identical run reaches nothing new.
+        input.reset();
+        for id in [OPEN, READ, IOCTL] {
+            input.begin_syscall(id);
+            input.advance_offset_for_syscall(id);
+        }
+        assert_eq!(input.capture_growth(), None);
+    }
+
+    #[test]
+    fn lineage_does_not_change_equality_or_hash() {
+        use std::collections::hash_map::DefaultHasher;
+        let call = std::array::from_fn(|_| BytesInput::new(vec![1u8; 4]));
+        let parent = AlmondInput::with_syscall(ACCEPT, call);
+        let child = parent.clone();
+        let mut applied = RoundTally::default();
+        applied.count(crate::telemetry::MutationClass::Bytes);
+        child.record_round(&applied);
+
+        let hash = |input: &AlmondInput| {
+            let mut h = DefaultHasher::new();
+            input.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(child.lineage().depth, 1);
+        assert_eq!(parent, child);
+        assert_eq!(hash(&parent), hash(&child));
+    }
+
+    #[test]
+    fn lineage_survives_the_postcard_round_trip_libafl_uses() {
+        let call = std::array::from_fn(|_| BytesInput::new(vec![7u8; 2]));
+        let input = AlmondInput::with_syscall(ACCEPT, call);
+        let mut applied = RoundTally::default();
+        applied.count(crate::telemetry::MutationClass::Calls);
+        input.record_round(&applied);
+
+        let bytes = postcard::to_allocvec(&*input.inner.read().unwrap()).unwrap();
+        let restored: AlmondInputInner = postcard::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.lineage.depth, 1);
+        assert_eq!(restored.lineage.calls, 1);
+        assert_eq!(restored.map, input.inner.read().unwrap().map);
+    }
+
+    #[test]
+    fn data_written_before_lineage_existed_does_not_load() {
+        // The serialized fields of the input as they were before `lineage`.
+        #[derive(Serialize)]
+        struct BeforeLineage {
+            map: BTreeMap<SyscallID, Calls>,
+            accessed_indicators: Vec<SyscallID>,
+            mutable_indicators: HashSet<SyscallID>,
+        }
+        let call = std::array::from_fn(|_| BytesInput::new(vec![7u8; 2]));
+        let current = AlmondInput::with_syscall(ACCEPT, call);
+        let old = BeforeLineage {
+            map: current.inner.read().unwrap().map.clone(),
+            accessed_indicators: vec![ACCEPT],
+            mutable_indicators: HashSet::new(),
+        };
+
+        let bytes = postcard::to_allocvec(&old).unwrap();
+
+        assert!(postcard::from_bytes::<AlmondInputInner>(&bytes).is_err());
     }
 
     #[test]

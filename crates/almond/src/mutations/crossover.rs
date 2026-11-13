@@ -17,7 +17,10 @@ use libafl::{
 };
 use libafl_bolts::{HasLen, Named, rands::Rand};
 
-use crate::input::AlmondInput;
+use crate::{
+    input::AlmondInput,
+    telemetry::{Classified, MutationClass},
+};
 
 /// Crossover mutator that inserts calls from a corpus input into the current input.
 #[derive(Debug)]
@@ -361,6 +364,18 @@ impl Named for AlmondCrossoverArgsMutator {
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }
+}
+
+impl Classified for AlmondCrossoverInsertMutator {
+    const CLASS: MutationClass = MutationClass::Crossover;
+}
+
+impl Classified for AlmondCrossoverReplaceMutator {
+    const CLASS: MutationClass = MutationClass::Crossover;
+}
+
+impl Classified for AlmondCrossoverArgsMutator {
+    const CLASS: MutationClass = MutationClass::Crossover;
 }
 
 #[cfg(test)]

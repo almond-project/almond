@@ -267,6 +267,9 @@ where
         input: &I,
     ) -> Result<ExitKind, Error> {
         self.observers_mut().pre_exec_child_all(state, input)?;
+        // The inner executor counts this execution before running the
+        // harness, so the harness sees the index it is about to be given.
+        crate::telemetry::set_exec_index(state.executions().saturating_add(1));
         let exit = self.inner.run_target(fuzzer, state, mgr, input)?;
         self.observers_mut()
             .post_exec_child_all(state, input, &exit)?;
